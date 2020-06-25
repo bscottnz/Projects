@@ -1,0 +1,426 @@
+---
+title: "Data Cleaning and Visualisation in R"
+output:
+ prettydoc::html_pretty:
+    theme: cayman
+    keep_md: true
+    df_print: paged
+---
+
+In this notebook I tidy and analyse the World Bank's data on [World Development Indicators.](https://datacatalog.worldbank.org/dataset/world-development-indicators) This is a widely used dataset of economic, health, education, and societal indicators. Additional [sub region](https://raw.githubusercontent.com/lukes/ISO-3166-Countries-with-Regional-Codes/master/all/all.csv) and [coordinate information](https://gist.githubusercontent.com/tadast/8827699/raw/3cd639fa34eec5067080a61c69e3ae25e3076abb/countries_codes_and_coordinates.csv) data were downloaded from Github. 
+
+```{r message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(gganimate)
+library(gifski)
+require(scales)
+library(plotly)
+library(maps)
+library(knitr)
+```
+
+```{r}
+wdi_data = read.csv("Data/WDI/WDIData.csv")
+wdi_country = read.csv("Data/WDI/WDICountry.csv")
+region = read.csv("Data/WDI/regions.csv")
+long_lat = read.csv("Data/WDI/country_coord.csv")
+```
+
+```{r}
+head(as_tibble(wdi_data), 5)
+```
+
+```{r}
+n_distinct(wdi_data$Indicator.Name)
+```
+
+There are 1431 indicators for each country in the main data file. We first scan through these and make a note of potential indicators of particular interest for later analysis.    
+
+```{r}
+variables = c("GDP per capita (current US$)",
+              "GDP (current US$)",
+              "Life expectancy at birth, total (years)",
+              "Net migration",
+              "Population, total",
+              "Refugee population by country or territory of origin",
+              "Refugee population by country or territory of asylum")
+
+```
+
+To tidy this data the following steps are taken.
+
+*   Select the indicators we wish to analyse.
+
+*   Transform the multiple year columns into a single year variable.
+
+*   Remove redundant columns.
+
+*   Transform the single indicator column into multiple variable columns.
+
+*   Reformat columns to be of appropriate name and type.
+
+Once we have our tidied data we can then join with the relevant data from the supplementary files.  
+
+```{r}
+wdi_data_tidy = wdi_data %>%
+  filter(Indicator.Name %in% variables) %>%
+  pivot_longer(X1960:X2019, names_to = "Year", values_to = "Value") %>%
+  select(-Indicator.Code, -X) %>%
+  pivot_wider(names_from = Indicator.Name, values_from = Value) %<>%
+  mutate(Year = as.numeric(gsub("X", "", Year))) %>%
+  rename(Country = ï..Country.Name, 'Country Code' = Country.Code)
+```
+
+```{r}
+wdi_country_2 = wdi_country %>%
+  select(ï..Country.Code, Income.Group) %>%
+  rename('Country Code' = ï..Country.Code, 'Income Group' = Income.Group)
+  
+```
+ 
+```{r}
+region_2 = region %>%
+  select('alpha.3', region, 'sub.region') %>%
+  rename("Region" = region, "Sub Region" = 'sub.region')
+```
+
+```{r}
+long_lat_2 = long_lat %>%
+  select(Alpha.3.code, Latitude..average., Longitude..average.) %>%
+  rename("Country Code" = Alpha.3.code, Latitude = Latitude..average., Longitude = Longitude..average.) %>%
+  mutate("Country Code" = gsub(" ", "", `Country Code`), Latitude = as.numeric(Latitude), Longitude = as.numeric(Longitude))
+  
+```
+ 
+```{r}
+wdi = wdi_data_tidy %>%
+  left_join(wdi_country_2, by = "Country Code") %>%
+  left_join(region_2, by = c("Country Code" = "alpha.3")) %>%
+  left_join(long_lat_2, by = "Country Code") %>%
+  select("Country", "Country Code", "Region", "Sub Region", Latitude, Longitude, Year, everything())
+
+```
+
+```{r}
+head(filter(wdi, Country == "New Zealand"), 5)
+```
+
+We now have all the data of interest in a workable format ready for analysis. 
+
+We will begin by visualising the change in GDP v life expectancy between years. 
+
+```{r}
+bb = c(1000000000, 100000000, 10000000, 1000000)
+g = wdi %>%
+  filter(!is.na(Region), Year < 2019) %>%
+  ggplot(aes(`GDP per capita (current US$)`, 
+             `Life expectancy at birth, total (years)`, 
+             size = `Population, total`, 
+             color = Region)) +
+  geom_point( alpha = 0.7) +
+  scale_size_continuous(name = "Population",
+                        breaks = bb,
+                        limits = c(1000000, 1000000000),
+                        range = c(1, 8)) +
+  scale_x_log10(labels = comma) +
+  theme_bw(base_size = 8) +
+  labs(title = "{round(frame_time)}", 
+       x = 'GDP per capita (USD)',
+       y = 'Life expectancy', 
+       caption = "") +
+  transition_time(Year) +
+  ease_aes('linear') + 
+  guides(colour = guide_legend(override.aes = list(size=2)),
+         (shape = guide_legend(override.aes = list(size = 0.5)))) +
+  theme(plot.title = element_text(color = "#007020",
+                                  size = 16, 
+                                  face = "bold"),
+        axis.text=element_text(size = 8), 
+        legend.title=element_text(size = 7), 
+        legend.text=element_text(size = 6))
+
+options(gganimate.dev_args = list(width = 4,
+                                  height = 3, 
+                                  units = 'in', 
+                                  res = 300))
+#animate(g,
+       # fps = 20, 
+       # nframes = 200,
+       # renderer=gifski_renderer())
+
+#anim_save("life_ex_v_gdp6.gif")
+
+```
+
+```{r}
+knitr::include_graphics("life_ex_v_gdp6.gif")
+```
+
+On average, both GDP and life expectancy are increasing each year. The gap between the highest and lowest life expectancy countries also seems to be decreasing. 
+
+We will now visualise the top GDP countries for each year, emphasising the change in rankings with an animated bar chart.
+
+```{r}
+top_gdp = wdi %>%
+  filter(!is.na(Region)) %>%
+  select(Country, `GDP (current US$)`, Year, Region) %>%
+  rename(g = `GDP (current US$)`) %>%
+  mutate(g = g / 1e12) %>%
+  filter(!is.na(g)) %>%
+  group_by(Year) %>%
+  mutate(rank = min_rank(-g) * 1, 
+         g_lbl = str_c("  ", Country, " ",(round(g,2)), "  ")) %>%
+  filter(rank <= 10) %>%
+  ungroup()
+
+
+p = ggplot(top_gdp, aes(x = rank, 
+                        y = Country,
+                        label = Country,
+                        group = Country,
+                        fill = as.factor(Region))) +
+  geom_tile(aes(y = g / 2, 
+                height = g,
+                width = 0.9,
+                fill = as.factor(Country)), 
+            alpha = 0.8, 
+            show.legend = FALSE) +
+  geom_text(aes(y = g,  
+                label = g_lbl,
+                hjust = ifelse(g > 15, 1, 0))) + 
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_reverse() +
+  theme_minimal() + 
+  theme(plot.title = element_text(color = "#007020", 
+                                  face = "bold", 
+                                  hjust = 0, 
+                                  size = 30),
+        axis.ticks.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        legend.position = "bottom",
+        legend.justification = "left") +
+  labs(title = "{closest_state}",
+       subtitle = "Ten Highest GDP Countries 1960 to 2018",
+       y = "",
+       x = "",
+       caption = "Source: worldbank.org | Dollar amount in Trillions (USD)") +
+  transition_states(Year, 
+                    transition_length = 4, 
+                    state_length = 1, 
+                    wrap = TRUE) + 
+  ease_aes("cubic-in-out") 
+  
+#animate(p, 
+        #nframes = 450, 
+       # fps = 15,
+       # width = 8,
+       # height = 6, 
+       # units = 'in',
+       # res=150,
+       # renderer=gifski_renderer())
+
+#anim_save("bar4.gif")
+```
+
+```{r}
+knitr::include_graphics("bar4.gif")
+```
+
+The United States has long been the dominating economic force, however, China is quickly rising and is challenging the United States for the leading position. 
+
+We now explore the extent of migration for each country by interactively plotting a world map, displaying net migration between 1960 and 2018.
+
+```{r warning=FALSE}
+migration = wdi %>%
+  group_by(Country) %>%
+  mutate(net_migration_to_date = sum(`Net migration`, na.rm = TRUE)) %>%
+  filter(!is.na(Region)) %>%
+  select(Country, `Country Code`, Latitude, Longitude, net_migration_to_date) %>%
+  mutate(positive_migration = ifelse(net_migration_to_date > 0, net_migration_to_date, NA)) %>%
+  mutate(negative_migration = ifelse(net_migration_to_date < 0, net_migration_to_date, NA)) %>%
+  distinct()
+
+# To set white in the colour scale to 0, we need to define a custom colour scale.
+colorlength = 100
+
+zero_normal = (0 - min(migration$net_migration_to_date)) / 
+  (max(migration$net_migration_to_date) - min(migration$net_migration_to_date))
+
+border = as.integer(zero_normal * colorlength)
+
+colorscale = as.list(1:colorlength)
+
+s = scales::seq_gradient_pal("#FF0000", "#ffe6e6", "Lab")(seq(0,1,length.out=border))
+for (i in 1:border) {
+  colorscale[[i]] = c((i - 1) / colorlength, s[i])
+}
+
+s = scales::seq_gradient_pal("#edf7f0", "#007020", "Lab")(seq(0,1,length.out=colorlength - border))
+for (i in 1:(colorlength - border)) {
+  colorscale[[i + border]] = c((i + border) / colorlength, s[i])
+}
+
+l = list(color = toRGB("grey"), width = 0.5)
+
+g = list(
+  showframe = FALSE,
+  showcoastlines = FALSE,
+  projection = list(type = 'Mercator'))
+
+fig = plot_geo(migration)
+fig = fig %>% add_trace(z = ~net_migration_to_date,
+                        color = ~net_migration_to_date,
+                        colorscale = colorscale,
+                        text = ~Country,
+                        locations = ~`Country Code`,
+                        marker = list(line = l))
+
+fig = fig %>% colorbar(title = list( text = '<b>Net Migration<b>',
+                                     family = "Arial" ))
+fig = fig %>% layout(
+  title = list(text = '<b>Net Migration by Country<br>1960 to 2018<b>',
+               y = 0.95, 
+               font = list(color = '#007020', 
+                           size = 30,
+                           family = "Arial" )), 
+  geo = g) 
+
+fig = fig %>% layout( 
+                     width = 900)
+
+fig
+```
+The United States has experienced mass positive migration between 1960 and 2018, with neighbouring Mexico among the highest countries experiencing negative migration. 
+
+We now determine the countries that have produced the highest number of refugees by 2018, and plot the trend in refugees from these countries between 2012 and 2018.
+
+```{r warning=FALSE}
+refugees = wdi %>%
+  filter(Year == 2018, !is.na(Region)) %>%
+  distinct() %>%
+  arrange(desc(`Refugee population by country or territory of origin`)) %>%
+  head(7)
+
+refugees_7_yr = wdi %>%
+  filter(Country %in% refugees$Country, between(Year, 2012, 2018)) %>%
+  select(Country, Year, `Refugee population by country or territory of origin`)
+
+ref_fig = plot_ly(refugees_7_yr,
+                  x = ~Year, 
+                  y = ~`Refugee population by country or territory of origin`, 
+                  type = "scatter", 
+                  mode = "lines+markers", 
+                  name = ~Country) %>%
+  layout(title = list(text = '<b>Refugee Population by Country of Origin 2012 to 2018<b>',
+                      y = 0.99, 
+                      font = list(color = '#007020', 
+                                  size = 20,
+                                  family = "Arial" )),
+         yaxis = list(title = 'Refugee Population by Country of Origin'),
+         xaxis = list(showgrid = FALSE),
+         width = 900)
+ref_fig
+```
+
+Syria has sadly seen a dramatic increase in refugees leaving the country as a result of the Syrian civil war, which has been on going since March 2011. 
+
+We now analyse which of the high income category countries are accepting the greatest number of refugees. We display the amount of refugees taken, and also express this amount as a percentage of the countries total population. 
+
+```{r warning=FALSE}
+top_asylum_countries = wdi %>%
+  filter(Year == 2018, !is.na(Region), `Income Group` == 'High income') %>%
+  distinct() %>%
+  arrange(desc(`Refugee population by country or territory of asylum`)) %>%
+  mutate(pop_percent_refugee = signif((`Refugee population by country or territory of asylum`
+         / `Population, total` * 100), 2)) %>%
+  select(Country, `Refugee population by country or territory of asylum`,
+         pop_percent_refugee) %>%
+  head(8)
+
+fig1 = plot_ly(data = top_asylum_countries, 
+               x = ~`Refugee population by country or territory of asylum`,
+               y = ~reorder(Country, `Refugee population by country or territory of asylum`),
+               name = 'Total Refugee Population',
+               type = 'bar', orientation = 'h',
+               marker = list(color = 'rgba(50, 171, 96, 0.6)',
+                              line = list(color = 'rgba(50, 171, 96, 1.0)',
+                                          width = 1.2))) %>% 
+  layout(yaxis = list(showgrid = FALSE,
+                      showline = FALSE, 
+                      showticklabels = TRUE,
+                      domain= c(0, 0.85)),
+                      xaxis = list(zeroline = FALSE,
+                                   showline = FALSE, 
+                                   showticklabels = TRUE, 
+                                   showgrid = TRUE)) %>% 
+  add_annotations(xref = 'x1',
+                  yref = 'y',
+                  x = top_asylum_countries$'Refugee population by country or territory of asylum' * 1.0,
+                  y = top_asylum_countries$Country,
+                  text = paste("                 ", 
+                               round(top_asylum_countries$'Refugee population by country or territory of asylum', 2)),
+                  font = list(family = 'Arial', 
+                              size = 12,
+                              color = 'rgb(50, 171, 96)'),
+                   showarrow = FALSE)
+
+fig2 = plot_ly(x = ~top_asylum_countries$pop_percent_refugee, 
+               y = ~reorder(top_asylum_countries$Country, 
+                            top_asylum_countries$`Refugee population by country or territory of asylum`),
+               name = 'Refugee Percentage of Total Polulation',
+               type = 'bar', orientation = 'h',
+               marker = list(color = 'rgb(184, 94, 184)',
+                              line = list(color = 'rgb(163, 0, 128)',
+                                          width = 1.2))) %>% 
+  layout(yaxis = list(showgrid = FALSE,
+                      showline = TRUE,
+                      showticklabels = FALSE,
+                      linecolor = 'rgba(102, 102, 102, 0.8)',
+                      linewidth = 2,
+                      domain = c(0, 0.85)),
+                      xaxis = list(zeroline = FALSE, 
+                                   showline = FALSE,
+                                   showticklabels = TRUE,
+                                   showgrid = TRUE,
+                                   side = 'top',
+                                   dtick = 0.5)) %>% 
+  add_annotations(xref = 'x2', 
+                  yref = 'y',
+                  x = top_asylum_countries$pop_percent_refugee, 
+                  y = top_asylum_countries$Country,
+                  text = paste("               ", top_asylum_countries$pop_percent_refugee, '%'),
+                  font = list(family = 'Arial',
+                              size = 12, 
+                              color = 'rgb(128, 0, 128)'),
+                  showarrow = FALSE)
+
+fig = subplot(fig1, fig2) %>% 
+  layout(title = 'High Income Countries With Highest Refugee Population 2018',
+         legend = list(x = 0.029, 
+                       y = 1.038,
+                       font = list(size = 10)),
+         margin = list(l = 100,
+                       r = 20, 
+                       t = 70, 
+                       b = 70),
+         paper_bgcolor = 'rgb(248, 248, 255)',
+         plot_bgcolor = 'rgb(248, 248, 255)',
+         width = 900) %>% 
+  add_annotations(xref = 'paper',
+                  yref = 'paper',
+                  x = -0.14,
+                  y = -0.15,
+                  text = paste(''),
+                  font = list(family = 'Arial', 
+                              size = 10, 
+                              color = 'rgb(150,150,150)'),
+                  showarrow = FALSE)
+
+fig
+```
+
+While Germany has accepted the greatest number of refugees of any high income country, Sweden has accepted the most when expressed as a percentage of their total population.  
